@@ -1,0 +1,45 @@
+#!/bin/bash
+
+set -e
+
+function err() {
+    echo '**' $*
+    exit 1
+}
+
+if [ $# != 2 ]; then
+   err "usage: $0 sourcedir version/target.tgz"
+fi
+
+src=$1
+dst=$2
+
+[ -d $src ] || err "expected directory: $src"
+[ -e $dst ] && err "expected nonexistent: $dst"
+
+versiondir=`dirname $dst`
+[ -d $versiondir ] || "expected directory: $versiondir"
+
+targetstem=`basename $dst .tgz`
+
+tmp=$versiondir/$targetstem
+# This will give an error if tmp dir is not a link
+if [ -L $tmp ]; then
+  rm $tmp
+elif [ -e $tmp ]; then
+  err "expected nonexistent: $tmp"
+fi
+
+echo "creating symbolic link $tmp -> $src"
+ln -sf $src $tmp
+
+# Follow-symlinks tar flag:
+#   -L on OS X
+#   --dereference on Debian
+if [ -d /System ] && false; then
+    flag=-L
+else
+    flag=--dereference
+fi
+
+tar cvzf $dst $flag -C $versiondir $targetstem
