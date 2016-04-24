@@ -2,18 +2,15 @@
 
 import os, json, registry
 
-default_registry_dir = 'the_registry'
+default_registry_dir = '../var/the_registry'
 
 #  The registry
 
 class Registry:
-    def __init__(self, registry_dir=default_registry_dir):
-        if not os.path.isdir(registry_dir):
-            os.mkdir(registry_dir)
-        self.registry_dir = registry_dir
-        self.resources = Table(os.path.join(registry_dir, 'resources.json'))
-        self.captures = Table(os.path.join(registry_dir, 'captures.json'))
-        self.unused_ids_path = os.path.join(registry_dir, 'unused_ids.json')
+    def __init__(self, resources_path, captures_path, unused_ids_path=None):
+        self.resources = Table(resources_path)
+        self.captures = Table(captures_path)
+        self.unused_ids_path = unused_ids_path
 
     def get_resource(self, name):
         return self.resources.get(name)
@@ -26,13 +23,12 @@ class Registry:
     def register_capture(self, cmeta):
         cmeta = validate_capture(cmeta, self)
         self.captures.put(cmeta['name'], cmeta)
-        if not 'id' in cmeta:
+        if not 'id' in cmeta and self.unused_ids_path != None:
             cmeta['id'] = self.next_special_id()
         self.captures.flush()
 
     def next_special_id(self):
-        if not os.path.exists(self.unused_ids_path):
-            self.wipe_unused()
+        self.wipe_unused()
         with open(self.unused_ids_path) as infile:
             ids = json.load(infile)
         id = ids[0]
@@ -51,6 +47,7 @@ class Registry:
             for cmeta in captures:
                 if cmeta['capture_of'] == capture_of:
                     all.append(cmeta)
+            captures = all
         return sorted(captures, key=lambda cmeta:cmeta['date'])
 
     def wipe(self):
@@ -59,8 +56,26 @@ class Registry:
         self.wipe_unused()
 
     def wipe_unused(self):
-        with open(self.unused_ids_path, 'w') as outfile:    # overwrite
-            json.dump(initial_unused_ids, outfile, indent=1)
+        if self.unused_ids_path != None:
+            if not os.path.exists(self.unused_ids_path):
+                with open(self.unused_ids_path, 'w') as outfile:    # overwrite
+                    json.dump(initial_unused_ids, outfile, indent=1)
+
+
+# Not used
+def get_capture_filename(cmeta, rmeta):
+    if '_filename' in cmeta:
+        return cmeta['_filename']
+    else:
+        return rmeta['_filename_template'].format(cap=cmeta['_capture_label'])
+
+def get_capture_path(cmeta, rmeta):
+    if '_filename' in cmeta:
+        # This is not very satisfactory.
+        return os.path.join(rmeta['name'], cmeta['name'], cmeta['_filename'])
+    else:
+        return rmeta['_path_template'].format(cap=cmeta['_capture_label'])
+
 
 # Unused ids (handy gaps in OTT 1.0 sequence)
 

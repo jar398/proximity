@@ -8,19 +8,23 @@
 
 import json, os, sys, csv, codecs
 
-default_seed_meta_path = 'seed.json'
+default_setup_data_path = 'one_time_setup_data.json'
 
-# Convert 'seed' form (resource / issue / capture from seed.json file)
-# to list of registry operations (interleaved resource registration
+# Convert 'setup data' form (resource / issue / capture from setup data json file)
+# to list of registry commands (interleaved resource registration
 # and capture registration).
 
-def load_seed_events(seed_meta_path=default_seed_meta_path):
-    with open(seed_meta_path) as infile:
-        seed_meta = json.load(infile)
-        for rmeta in seed_meta["resources"]: # Resource dictionary / blob
-            # Performs lots of side effects on rmeta
-            process_resource_meta(rmeta)
-        return seed_meta_to_registry_commands(seed_meta)
+def get_setup_commands(setup_data_path=default_setup_data_path):
+    setup_data = load_setup_data(setup_data_path)
+    for rmeta in setup_data["resources"]: # Resource dictionary / blob
+        # Performs lots of side effects on rmeta
+        process_resource_meta(rmeta)
+    return setup_data_to_registry_commands(setup_data)
+
+def load_setup_data(setup_data_path=default_setup_data_path):
+    with open(setup_data_path) as infile:
+        return json.load(infile)
+
 
 # Validate the metadata and clobber all the dictionaries with new fields.
 # Copy some fields down to issues and captures (inheritance).
@@ -43,8 +47,12 @@ def process_resource_meta(rmeta):
             rmeta['date'] = earliest_date
         if prefix != None: latest_prefix= prefix
         if suffix != None: latest_suffix= suffix
-    rmeta['_prefix'] = latest_prefix
-    rmeta['_suffix'] = latest_suffix
+    # rmeta['_prefix'] = latest_prefix
+    # rmeta['_suffix'] = latest_suffix
+    rname = rmeta['name']
+    rmeta['_name_template'] = '%s{cap}' % (latest_prefix,)
+    rmeta['_filename_template'] = '%s{cap}%s' % (latest_prefix, latest_suffix)
+    rmeta['_path_template'] = '%s/%s{cap}/%s{cap}%s' % (rname, latest_prefix, latest_prefix, latest_suffix)
 
 # Moves issue metadata down into capture metadata.
 # Returns (capture metadata blob or None, prefix, suffix).
@@ -78,7 +86,7 @@ def process_capture_meta(issue, rmeta):
     legal = cmeta["legal"]
     if not legal in ["pd", "cc0", "public"]:
         # print 'echo @@ not known to be archivable', stem, suffix
-        cmeta['archivable'] = False
+        cmeta['_archivable'] = False
 
     # Inheritance from resource
     if "ott_idspace" in rmeta:
@@ -93,9 +101,6 @@ def process_capture_meta(issue, rmeta):
 
     # Set the date field for the capture - needed for sorting
     cmeta['date'] = generic_date(cmeta)
-
-    # Filename = (prefix + relative_name) + suffix = stem + suffix
-    # (Analyzr this so that we can create more capture filenames in the future.)
 
     # Default capture file location is files.opentreeoflife.org/resource/iname/
     #  which contains capture files (zips, tarballs)
@@ -113,10 +118,14 @@ def process_capture_meta(issue, rmeta):
         i += 1
     prefix = stem[0:i]
 
-    relative_name = stem[len(prefix):] # Unique within resource.
-    cmeta['_relative_name'] = relative_name
+    capture_label = stem[len(prefix):] # Unique within resource.
+    cmeta['_capture_label'] = capture_label
 
-    cmeta['_filename'] = stem + suffix   # Filename, globally unique
+    # Filename = (prefix + capture_label) + suffix = stem + suffix
+    fn1 = stem + suffix
+    # fn2 = rmeta['_filename_template'].format(capture_label)
+
+    cmeta['_filename'] = fn1   # Filename, globally unique
     return (cmeta, prefix, suffix)
 
 # For a given issue blob, find and canonicalize the canonical capture blob
@@ -132,7 +141,8 @@ def normalize_issue_capture(issue, rmeta):
                 print 'echo @@ unrecognized key in capture', key
         if not ("locations" in cmeta or "bytes" in cmeta):
             return None
-        suffix = rmeta.get(suffix_field)
+        suffix = issue.get(suffix_field)
+        if suffix == None: suffix = rmeta.get(suffix_field)
         if suffix == None: suffix = suffix_default
         cmeta['legal'] = legal
         return (cmeta, suffix)
@@ -163,19 +173,19 @@ capture_allowed_keys = allowed_keys + ["locations", "bytes", "doi",
 # This is called *after* a fair amount of processing has been done on
 # the JSON
 
-def seed_meta_to_registry_commands(seed_meta):
+def setup_data_to_registry_commands(setup_data):
     events = []
-    for rmeta in seed_meta["resources"]:
+    for rmeta in setup_data["resources"]:
         events.extend(resource_meta_to_registry_commands(rmeta))
     return fix_corpus(events)
 
 def resource_meta_to_registry_commands(rmeta):
     events = []
     new_rmeta = {'name': rmeta['name'], '_type': 'resource'}
-    for prop in ["description", "capture_description", "===", "ott_idspace", "doi",
-                 '_prefix', '_suffix']:
-        if prop in rmeta:
-            new_rmeta[prop] = rmeta[prop]
+    for key in ["description", "capture_description", "===", "ott_idspace", "doi",
+                 '_name_template', '_filename_template', '_path_template']:
+        if key in rmeta:
+            new_rmeta[key] = rmeta[key]
     # Set the date field of the resource - needed for sorting
     new_rmeta['date'] = rmeta['date']
     events.append(new_rmeta)
@@ -186,10 +196,18 @@ def resource_meta_to_registry_commands(rmeta):
     for issue in rmeta["issues"]:
         cmeta = issue['_capture']
         if cmeta != None:
-            events.append(cmeta)
+            events.append(capture_meta_to_registry_command(cmeta))
     return events
 
-# Things to do with the sorted list of operations (resources + captures).
+def capture_meta_to_registry_command(cmeta):
+    new_cmeta = {}
+    disallowed = ['_ott_idspace']
+    for key in cmeta:
+        if not key in disallowed:
+            new_cmeta[key] = cmeta[key]
+    return new_cmeta
+
+# Things to do with the sorted list of commands (resources + captures).
 
 def fix_corpus(events):
     # Index by name
@@ -213,9 +231,9 @@ def fix_corpus(events):
         else:
             print '** dangling reference', event_name(event), name
     for event in events:
-        for prop in ["derived_from", 'capture_of']:
-            if prop in event:
-                check_forward_refs(event.get(prop), event)
+        for key in ["derived_from", 'capture_of']:
+            if key in event:
+                check_forward_refs(event.get(key), event)
         if 'references' in event:
             for key in event['references']:
                 check_forward_refs(event['references'][key], event)
@@ -324,11 +342,12 @@ available_ids = [51, 52, 55, 57, 61, 62, 64, 66, 68, 70, 72, 74, 75,
                  228, 229, 232, 233, 238, 240, 241, 242, 243, 244,
                  245, 247, 249, 253, 255, 256]
 
-def doit(seed_meta_path):
-    arts = load_seed_events(seed_meta_path)
+def doit(setup_data_path):
+    events = get_setup_commands(setup_data_path)
     out = sys.stdout
-    json.dump(arts, out, indent=2)
+    json.dump(events, out, indent=2)
     
 
 if __name__ == '__main__':
-    doit(seed_meta_path)
+    # doit(default_setup_data_path)
+    doit(sys.argv[1])

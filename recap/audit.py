@@ -15,6 +15,10 @@ p.add_argument("prefix",
 p.add_argument("files",
                help="location base for files host, e.g. 'http://files.opentreeoflife.org/' or 'varela:/home/opentree/files.opentreeoflife.org/'",
                default='http://files.opentreeoflife.org/')
+p.add_argument("resources",
+               default='var/recap/initial_resources.json')
+p.add_argument("captures",
+               default='var/recap/initial_captures.json')
 
 # os.path.realpath(symlink)
 
@@ -44,9 +48,14 @@ import registry
 def audit(the_registry, repo, prefix, local, files_prefix):
     commands = []
     for rmeta in the_registry.all_resources():
-        commands.extend(audit_resource(rmeta, repo))
-    for cmeta in the_registry.all_captures():
-        commands.extend(audit_capture(cmeta, repo, prefix, local, files_prefix))
+        did = False
+        for cmeta in the_registry.all_captures(rmeta['name']):
+            a = audit_capture(cmeta, rmeta, repo, prefix, local, files_prefix)
+            if len(a) > 0:
+                if not did:
+                    commands.extend(audit_resource(rmeta, repo))
+                    did = True
+                commands.extend(a)
     print 'set -e'
     for command in commands:
         print command
@@ -59,17 +68,13 @@ def audit_resource(rmeta, repo):
     else:
         return ["mkdir %s" % resource_dir]
 
-def full_path(cmeta, repo):
-    otpath = os.path.join(cmeta['capture_of'], cmeta['name'], cmeta['_filename'])
-    return os.path.join(repo, otpath)
-
 # Returns list of strings for commands needed to fix things
 
-def quick_audit_capture(cmeta, repo):
+def quick_audit_capture(cmeta, rmeta, repo):
 
     # otpath is relative to local repo clone.
-    otpath = os.path.join(cmeta['capture_of'], cmeta['name'], cmeta['_filename'])
-    dst = full_path(cmeta, repo)
+    otpath = registry.get_capture_path(cmeta, rmeta)
+    dst = os.path.join(repo, otpath)
     if os.path.exists(dst):
         if os.path.islink(dst):
             print '** expected a file but found symlink', dst
@@ -81,19 +86,23 @@ def quick_audit_capture(cmeta, repo):
             have = os.stat(dst).st_size
             want = cmeta['bytes']
             if have == want:
-                # print 'file sizes match - good', cmeta['name'], want, have
+                # print 'file sizes match - good', dst, want, have
                 return True
             else:
-                print '** exists but size is wrong', cmeta['name'], want, have
+                print '** exists but size is wrong', dst, want, have
                 return False
         else:
-            print 'exists and might be OK', cmeta['name']
+            print 'exists and might be OK', dst
             return True
+    else:
+        print '** does not exist:', dst
+        return False
 
+def audit_capture(cmeta, rmeta, repo, prefix, local, files_prefix):
 
-def audit_capture(cmeta, repo, prefix, local, files_prefix):
+    if cmeta.get('_archivable') == False: return []
 
-    if quick_audit_capture(cmeta, repo):
+    if quick_audit_capture(cmeta, rmeta, repo):
         # OK, nothing to be done.
         return []
 
@@ -128,7 +137,8 @@ def audit_capture(cmeta, repo, prefix, local, files_prefix):
     else:
         locations = []
 
-    dst = full_path(cmeta, repo)
+    otpath = registry.get_capture_path(cmeta, rmeta)
+    dst = os.path.join(repo, otpath)
 
     # Returns commands or None
     def try_location(loc):
@@ -186,7 +196,7 @@ def audit_capture(cmeta, repo, prefix, local, files_prefix):
             command = maybe_command
 
     if command == None:
-        print '** no candidate locations for this capture', cmeta['name']
+        print '** no candidate locations for this capture:', cmeta['name']
         return []
 
     commands = []
@@ -202,4 +212,4 @@ def audit_capture(cmeta, repo, prefix, local, files_prefix):
 args = p.parse_args()
 
 if __name__ == '__main__':
-    audit(registry.Registry(), args.repo, args.prefix, args.base, args.files)
+    audit(registry.Registry(args.resources, args.captures), args.repo, args.prefix, args.base, args.files)
