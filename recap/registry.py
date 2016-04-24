@@ -70,11 +70,7 @@ def get_capture_filename(cmeta, rmeta):
         return rmeta['_filename_template'].format(cap=cmeta['_capture_label'])
 
 def get_capture_path(cmeta, rmeta):
-    if '_filename' in cmeta:
-        # This is not very satisfactory.
-        return os.path.join(rmeta['name'], cmeta['name'], cmeta['_filename'])
-    else:
-        return rmeta['_path_template'].format(cap=cmeta['_capture_label'])
+    return os.path.join(rmeta['name'], cmeta['name'], get_capture_filename(cmeta['_filename']))
 
 
 # Unused ids (handy gaps in OTT 1.0 sequence)

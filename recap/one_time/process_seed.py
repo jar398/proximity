@@ -16,83 +16,102 @@ default_setup_data_path = 'one_time_setup_data.json'
 
 def get_setup_commands(setup_data_path=default_setup_data_path):
     setup_data = load_setup_data(setup_data_path)
-    for rmeta in setup_data["resources"]: # Resource dictionary / blob
-        # Performs lots of side effects on rmeta
-        process_resource_meta(rmeta)
     return setup_data_to_registry_commands(setup_data)
 
 def load_setup_data(setup_data_path=default_setup_data_path):
     with open(setup_data_path) as infile:
         return json.load(infile)
 
+# For validating the setup_data
 
-# Validate the metadata and clobber all the dictionaries with new fields.
-# Copy some fields down to issues and captures (inheritance).
-# No return value.
+allowed_keys = ["name", "retrieved_from", "original_suffix", "derived_suffix", "legal", "===", "ott_idspace"]
+resource_allowed_keys = allowed_keys + ["issues", "description", "capture_description", "issue_prefix", "doi"]
+issue_allowed_keys = allowed_keys + ["original", "derived", "derived_from"]
+capture_allowed_keys = allowed_keys + ["locations", "bytes", "doi",
+                                        "sources", "from", "commit",
+                                        "retrieved_from", "retrievable_from",
+                                        "generated_on", "last_modified", "publication_date"]
 
-def process_resource_meta(rmeta):
-    for key in rmeta:
+def setup_data_to_registry_commands(setup_data):
+    commands = []
+    for rsetup in setup_data["resources"]: # Resource dictionary / blob
+        # Performs lots of side effects on rmeta
+        commands.extend(process_resource_setup(rsetup))
+    return fix_corpus(commands)
+
+# Validate the metadata from the setup_data and clobber all the
+# dictionaries with new fields.  Copy some fields down to issues and
+# captures (inheritance).  No return value.
+
+def process_resource_setup(rsetup):
+    for key in rsetup:
         if not key in resource_allowed_keys:
             print 'echo @@ invalid resource field', key
-    if not "name" in rmeta:
-        print 'echo @@ resource has no name', rmeta
+    if not "name" in rsetup:
+        print 'echo @@ resource has no name', rsetup
         return
+    commands = []
+    issues = rsetup["issues"]
+    rmeta = dict(rsetup)
+    del rmeta["issues"]
+
+    rmeta['_type'] = 'resource'
     earliest_date = None
     latest_prefix = None
     latest_suffix = None
-    for issue in rmeta["issues"]:
-        (cmeta, prefix, suffix) = process_capture_meta(issue, rmeta)
+    commands.append(rmeta)
+    for issue in issues:
+        (cmeta, prefix, suffix) = process_issue(issue, rsetup)
+        commands.append(cmeta)
         if cmeta != None and earliest_date == None:
             earliest_date = cmeta['date']
             rmeta['date'] = earliest_date
-        if prefix != None: latest_prefix= prefix
-        if suffix != None: latest_suffix= suffix
+        if prefix != None: latest_prefix = prefix
+        if suffix != None: latest_suffix = suffix
     # rmeta['_prefix'] = latest_prefix
     # rmeta['_suffix'] = latest_suffix
-    rname = rmeta['name']
+    if earliest_date != None:
+        rmeta['date'] = earliest_date
     rmeta['_name_template'] = '%s{cap}' % (latest_prefix,)
     rmeta['_filename_template'] = '%s{cap}%s' % (latest_prefix, latest_suffix)
-    rmeta['_path_template'] = '%s/%s{cap}/%s{cap}%s' % (rname, latest_prefix, latest_prefix, latest_suffix)
+    return commands
 
-# Moves issue metadata down into capture metadata.
-# Returns (capture metadata blob or None, prefix, suffix).
+# Moves resource and issue metadata down into capture metadata.
+# Returns {capture metadata blob or None}, prefix, suffix.
 
-def process_capture_meta(issue, rmeta):
+def process_issue(issue, rsetup):
 
-    stem = issue["name"] # Globally unique.
+    cname = issue["name"]
 
     # Validate issue fields
     for key in issue:
         if not key in issue_allowed_keys:
-            print 'echo @@ unrecognized key in issue', key, stem
+            print 'echo @@ unrecognized key in issue', key, cname
 
     fail = (None, None, None)
 
-    # Get capture metadata for the (now) unique capture for this issue
-    (cmeta, suffix) = normalize_issue_capture(issue, rmeta)
+    # Get initial capture metadata for the (now) unique capture for this issue
+    (cmeta, suffix) = normalize_issue_capture(issue, rsetup)
     if cmeta == None:
-        print 'echo @@ no archivable capture', stem
+        print 'echo @@ no archivable capture', cname
         return fail
+
+    # Compute some new field values
     cmeta['_type'] = 'capture'
-
-    # Globally unique name for indexing, file system, etc.
-    cmeta['name'] = stem
-
-    # Resource that this is a part of
-    rname = rmeta["name"]
-    cmeta['capture_of'] = rname
+    cmeta['name'] = cname   # Globally unique
+    cmeta['capture_of'] = rsetup["name"]  # Resource that this capture is a part of
 
     # Legal is a bit complicated
     legal = cmeta["legal"]
     if not legal in ["pd", "cc0", "public"]:
-        # print 'echo @@ not known to be archivable', stem, suffix
+        # print 'echo @@ not known to be archivable', cname, suffix
         cmeta['_archivable'] = False
 
-    # Inheritance from resource
-    if "ott_idspace" in rmeta:
-        cmeta['_ott_idspace'] = rmeta["ott_idspace"]
+    # Inherit idspace from resource
+    if "ott_idspace" in rsetup:
+        cmeta['_ott_idspace'] = rsetup["ott_idspace"]
 
-    # Inheritance from issue
+    # Inheritance comment from issue
     if "===" in issue:
         if "===" in cmeta:
             cmeta["==="] = cmeta["==="] + u' - ' + issue["==="]
@@ -102,52 +121,47 @@ def process_capture_meta(issue, rmeta):
     # Set the date field for the capture - needed for sorting
     cmeta['date'] = generic_date(cmeta)
 
-    # Default capture file location is files.opentreeoflife.org/resource/iname/
-    #  which contains capture files (zips, tarballs)
-    if not 'name' in issue:
-        print 'echo @@ issue has no name', issue
-        return fail
-    prefix = rmeta.get('issue_prefix')
+    # Set file name from issue/capture name plus suffix
+    cmeta['_filename'] = cname + suffix   # Filename, globally unique
+
+    # Resource needs prefix for generating new capture names
+    prefix = rsetup.get("issue_prefix")
     if prefix == None:
-        prefix = rname
-    if not stem.startswith(prefix):
-        print '** how to split this into prefix + relativename?', stem
+        prefix = rsetup["name"]
+    if not cname.startswith(prefix):
+        print '** how to split this into prefix + relativename?', cname
         return fail
     i = len(prefix)
-    if stem[i] == '-' or stem[i] == '.':
+    if cname[i] == '-' or cname[i] == '.':
         i += 1
-    prefix = stem[0:i]
+    prefix = cname[0:i]
 
-    capture_label = stem[len(prefix):] # Unique within resource.
-    cmeta['_capture_label'] = capture_label
+    cmeta['_capture_label'] = cname[len(prefix):]  # Unique within resource.
 
-    # Filename = (prefix + capture_label) + suffix = stem + suffix
-    fn1 = stem + suffix
-    # fn2 = rmeta['_filename_template'].format(capture_label)
-
-    cmeta['_filename'] = fn1   # Filename, globally unique
     return (cmeta, prefix, suffix)
 
 # For a given issue blob, find and canonicalize the canonical capture blob
+# Bletcherous conversion from abandoned data model to simpler one
 
-def normalize_issue_capture(issue, rmeta):
+def normalize_issue_capture(issue, rsetup):
     def norm(capture_field, suffix_field, suffix_default, legal):
-        cmeta = issue.get(capture_field)
-        if cmeta == None:
+        csetup = issue.get(capture_field)
+        if csetup == None:
             return None
         # Validate before doing any munging
-        for key in cmeta:
+        for key in csetup:
             if not key in capture_allowed_keys:
                 print 'echo @@ unrecognized key in capture', key
-        if not ("locations" in cmeta or "bytes" in cmeta):
+        if not ("locations" in csetup or "bytes" in csetup):
             return None
         suffix = issue.get(suffix_field)
-        if suffix == None: suffix = rmeta.get(suffix_field)
+        if suffix == None: suffix = rsetup.get(suffix_field)
         if suffix == None: suffix = suffix_default
+        cmeta = dict(csetup)
         cmeta['legal'] = legal
         return (cmeta, suffix)
     legal = issue.get("legal")
-    if legal == None: legal = rmeta.get("legal")
+    if legal == None: legal = rsetup.get("legal")
     s1 = norm("original", "original_suffix", ".original", legal)
     s2 = norm("derived", "derived_suffix", ".derived", "cc0")
     if s2 != None:
@@ -162,62 +176,18 @@ def normalize_issue_capture(issue, rmeta):
     return (cmeta, suffix)
 
 
-allowed_keys = ["name", "retrieved_from", "original_suffix", "derived_suffix", "legal", "===", "ott_idspace"]
-resource_allowed_keys = allowed_keys + ["issues", "description", "capture_description", "issue_prefix", "doi"]
-issue_allowed_keys = allowed_keys + ["original", "derived", "derived_from"]
-capture_allowed_keys = allowed_keys + ["locations", "bytes", "doi",
-                                        "references", "from", "commit",
-                                        "retrieved_from", "retrievable_from",
-                                        "generated_on", "last_modified", "publication_date"]
-
-# This is called *after* a fair amount of processing has been done on
-# the JSON
-
-def setup_data_to_registry_commands(setup_data):
-    events = []
-    for rmeta in setup_data["resources"]:
-        events.extend(resource_meta_to_registry_commands(rmeta))
-    return fix_corpus(events)
-
-def resource_meta_to_registry_commands(rmeta):
-    events = []
-    new_rmeta = {'name': rmeta['name'], '_type': 'resource'}
-    for key in ["description", "capture_description", "===", "ott_idspace", "doi",
-                 '_name_template', '_filename_template', '_path_template']:
-        if key in rmeta:
-            new_rmeta[key] = rmeta[key]
-    # Set the date field of the resource - needed for sorting
-    new_rmeta['date'] = rmeta['date']
-    events.append(new_rmeta)
-
-    # Move suffix and prefix from capture to resource
-    suffix = None
-    prefix = None
-    for issue in rmeta["issues"]:
-        cmeta = issue['_capture']
-        if cmeta != None:
-            events.append(capture_meta_to_registry_command(cmeta))
-    return events
-
-def capture_meta_to_registry_command(cmeta):
-    new_cmeta = {}
-    disallowed = ['_ott_idspace']
-    for key in cmeta:
-        if not key in disallowed:
-            new_cmeta[key] = cmeta[key]
-    return new_cmeta
-
 # Things to do with the sorted list of commands (resources + captures).
 
-def fix_corpus(events):
-    # Index by name
-    by_name = index_by_name(events)
+def fix_corpus(commands):
 
-    events = by_name.values()
-    events = sorted(events, key=event_sort_key)
+    # Index by name
+    by_name = index_by_name(commands)
+
+    commands = by_name.values()
+    commands = sorted(commands, key=event_sort_key)
 
     # not needed any more?
-    flush_by_doi(events)
+    flush_by_doi(commands)
 
     # Make sure there are no broken or forward references
     seen = {}
@@ -230,7 +200,7 @@ def fix_corpus(events):
             print '** forward reference', event_name(event), name
         else:
             print '** dangling reference', event_name(event), name
-    for event in events:
+    for event in commands:
         for key in ["derived_from", 'capture_of']:
             if key in event:
                 check_forward_refs(event.get(key), event)
@@ -239,30 +209,57 @@ def fix_corpus(events):
                 check_forward_refs(event['references'][key], event)
         seen[event_name(event)] = True
 
-    # Reconstruct resource-to-capture bindings for OTT
-    sources = {}                # maps idspace to capture
-    for event in events:
-        # we only care about the captures, not the resources
-        if event.get('capture_of') == 'ott':
-            refs = {}
-            for key in sources: # copy sources dict
-                r = sources[key]
-                refs[key] = r['name']
-            event['proposed_references'] = refs
-        if "_ott_idspace" in event and ('locations' in event or 'bytes' in event):
-            # chronological update
-            sources[event["_ott_idspace"]] = event
+    set_ott_sources(commands)
 
-    return events
+    return map(clean_command, commands)
+
+def set_ott_sources(commands):
+    # Kludge to reconstruct resource-to-capture bindings for OTT
+    # Go through resources and captures chronologically
+    sources = {}                # maps idspace to capture label
+    resource_to_idspace = {}
+    for command in commands:
+
+        if 'ott_idspace' in command:
+            # Command is a resource that contributes to OTT
+            resource_to_idspace[command['name']] = command['ott_idspace']
+
+        elif command.get('capture_of') == 'ott':
+            # OTT capture (i.e. build) presumed to use latest captures of sources
+            if len(sources) < 2:
+                print '** not enough OTT sources', sources, command['name']
+            else:
+                command['sources'] = dict(sources)
+
+        elif 'locations' in command or 'bytes' in command:
+            # Capture is potential OTT source
+            rname = command['capture_of']
+            if rname in resource_to_idspace:
+                sources[resource_to_idspace[rname]] = command['name']
+
+
+def clean_command(command):
+    new_command = {}
+    for key in command:
+        if not key in disallowed_keys:
+            new_command[key] = command[key]
+    return new_command
+
+disallowed_keys = ["issues", "original_suffix", "derived_suffix",
+                   '_ott_idspace', "locations"]
+
+#    for key in ['name', '_type', "description", "capture_description", "===", "ott_idspace", "doi",
+#                '_name_template', '_filename_template', 'sources', 'proposed_sources', 'date']:
+
 
 # One DOI per resource
 
-def flush_by_doi(events):
+def flush_by_doi(commands):
     # Eliminate redundant entries by DOI
     #  (could use other identity criteria too, later)
     by_doi = {}    # doi to name
     merges = {}    # name to name
-    for event in events:
+    for event in commands:
         if 'doi' in event:
             doi = event['doi']
             name = event_name(event)
@@ -274,7 +271,7 @@ def flush_by_doi(events):
         print '** deleting', merged_name, '->', merges[merged_name]
         del by_name[merged_name]
     # Snap merge pointers
-    for event in events:
+    for event in commands:
         to_name = event.get("derived_from")
         if to_name in merges:
             # print '** snapping', to_name, merges[to_name]
@@ -293,9 +290,9 @@ def event_sort_key(event):
     if event.get('capture_of') == 'ott': lateness = 2
     return (generic_date(event), lateness)
 
-def index_by_name(events):
+def index_by_name(commands):
     by_name = {}
-    for event in events:
+    for event in commands:
         name = event['name']
         if name in event:
             print '** duplicate!', name
@@ -343,9 +340,9 @@ available_ids = [51, 52, 55, 57, 61, 62, 64, 66, 68, 70, 72, 74, 75,
                  245, 247, 249, 253, 255, 256]
 
 def doit(setup_data_path):
-    events = get_setup_commands(setup_data_path)
+    commands = get_setup_commands(setup_data_path)
     out = sys.stdout
-    json.dump(events, out, indent=2)
+    json.dump(commands, out, indent=2)
     
 
 if __name__ == '__main__':
